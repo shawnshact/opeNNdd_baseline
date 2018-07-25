@@ -1,6 +1,6 @@
 import os
 import sys
-from multiprocessing import Process, Queue, Pipe, Pool
+from multiprocessing import Pool
 import numpy as np
 import h5py as h5
 import itertools
@@ -89,10 +89,10 @@ class Baseline:
         self.train_chunk_index, self.val_chunk_index = 0,0
         self.epochs, self.optimal_epochs = 0, 0
         self.min_epochs, self.stop_threshold = 0, 5
-        self.master, self.subprocess = Pipe()
+        #self.master, self.subprocess = Pipe()
         self.running_process = False
-        self.train_queue = Queue()
-        self.val_queue = Queue()
+        #self.train_queue = Manager().Queue()
+        #self.val_queue = Queue()
         self.max_num_processes = 5
         self.concurrent_processes = Pool(processes=self.max_num_processes)
 
@@ -111,6 +111,7 @@ class Baseline:
         self.test_db_index = 0
 
     def next_train_chunk(self, chunk_index):
+        print("start")
         flag = False
         chunk_size = self.chunk_size
         #get the next batch
@@ -133,8 +134,10 @@ class Baseline:
             self.train_db_index += chunk_size
 
         #return as np arrays
-        self.train_queue.put([batch_ligands, batch_energies])
-        self.subprocess.send(False)
+        print("finish")
+        #self.train_queue.put([batch_ligands, batch_energies])
+        return [batch_ligands, batch_energies]
+        
 
     def next_val_chunk(self):
         flag = False
@@ -217,21 +220,20 @@ class Baseline:
 
         while True:
             self.shuffle_train_data()
-            self.concurrent_processes.apply_async(self.next_train_chunk, args=(chunk_index,) for chunk_index in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size))
-
+            results=[self.concurrent_processes.apply(self.next_train_chunk, args=(index,)) for index in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size)]
+            
             if self.train_db_index > self.train_members:
                 self.train_db_index = 0
             else:
                 self.train_db_index += self.chunk_size*self.max_num_processes
 
-            for chunk in range(self.total_train_chunks-1):
+            for chunk in range(len(results)):
                 print("starting chunk #"+str(chunk))
-                self.train_receiver = self.train_queue.get(True)
-                self.running_process = self.master.recv()
+                self.train_receiver = results[chunk]
                 chunk_size = self.train_receiver[1].shape[0]
                 print(self.train_receiver[1])
                 for batch in tqdm(range(self.train_steps),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
-                    print(self.running_process, self.train_queue.qsize())
+                    #print(self.running_process, self.train_queue.qsize())
                     ligands, labels = self.next_train_batch(chunk_size)
                     model.partial_fit(ligands, labels)
 
