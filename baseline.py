@@ -210,9 +210,9 @@ class Baseline:
 
     def train(self):
         if (self.existing_model):
-            clf = joblib.load(self.model_file)
+            model = joblib.load(self.model_file)
         else:
-            clf = SGDRegressor()
+            model = SGDRegressor()
 
         lowest_err = float('inf')
         stop_iter = 0
@@ -232,15 +232,16 @@ class Baseline:
                         self.running_process = True
                         p_next.start()
                     ligands, labels = self.next_train_batch(chunk_size)
-                    clf.partial_fit(ligands, labels)
+                    model.partial_fit(ligands, labels)
 
-            val_err = self.validate()
+            print("reached validation")
+            val_err = self.validate(model)
 
             self.epochs+=1
 
             if (val_err < lowest_err):
                 lowest_err = val_err
-                joblib.dump(clf, self.model_file)
+                joblib.dump(model, self.model_file)
                 stop_iter = 0
                 self.optimal_epochs = self.epochs
             else:
@@ -251,10 +252,10 @@ class Baseline:
                 print("\nValidation Set Error:", lowest_err)
                 return
 
-    def validate(self):
+    def validate(self, model):
         self.shuffle_val_data()
-        clf = joblib.load(self.model_file)
         total_mse = 0
+        print("started val process")
         p_next = Process(target=self.next_train_chunk, args=())
         p_next.start()
         for chunk in range(self.total_val_chunks):
@@ -268,7 +269,7 @@ class Baseline:
                     p_next.start()
 
                 ligands, labels = self.next_val_batch(chunk_size)
-                predictions = clf.predict(ligands)
+                predictions = model.predict(ligands)
                 mse = mean_squared_error(labels, predictions)
                 total_mse += mse
 
