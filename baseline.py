@@ -223,7 +223,9 @@ class Baseline:
             self.running_process = True
             p_next.start()
             for chunk in range(self.total_train_chunks):
+                print("new train receiver")
                 self.train_receiver = self.train_queue.get(True)
+                print("populated train receiver (line 227)")
                 chunk_size = self.train_receiver[1].shape[0]
                 for batch in tqdm(range(self.train_steps),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
                     if (not self.running_process and self.train_queue.qsize() < self.max_queue_size):
