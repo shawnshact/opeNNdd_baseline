@@ -34,7 +34,7 @@ def binSearch(arr, target):
             mid = (low+high)//2
     return mid
 
-class SVM_Baseline:
+class Baseline:
     train_split, val_split, test_split = .7,.1,.2
     grid_dim, channels = 72, 6
     chunk_size = 50
