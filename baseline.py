@@ -225,7 +225,7 @@ class SVM_Baseline:
             for chunk in range(self.total_train_chunks):
                 self.train_receiver = self.train_queue.get(True)
                 chunk_size = self.train_receiver[1].shape[0]
-                for batch in tqdm(range(chunk_size/batch_size),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
+                for batch in tqdm(range(self.train_steps),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
                     if (not self.running_process and self.train_queue.qsize() < self.max_queue_size):
                         p_next.terminate()
                         p_next = Process(target=self.next_train_chunk)
@@ -260,7 +260,7 @@ class SVM_Baseline:
         for chunk in range(self.total_val_chunks):
             self.val_receiver = self.val_queue.get(True)
             chunk_size = self.val_receiver[1].shape[0]
-            for batch in range(chunk_size):
+            for batch in range(self.val_steps):
                 if (not self.running_process and self.val_queue.qsize() < self.max_queue_size):
                     p_next.terminate()
                     p_next = Process(target=self.next_train_chunk)
