@@ -1,11 +1,16 @@
 import os
 import sys
-from multiprocessing import Pool
+from multiprocessing import Pool, Process
 import numpy as np
 import h5py as h5
 import itertools
 import random
 import math
+from sklearn import svm
+from sklearn.linear_model import SGDRegressor
+from sklearn.externals import joblib
+from sklearn.metrics import mean_squared_error
+from tqdm import tqdm
 from datetime import datetime
 random.seed(datetime.now())
 
@@ -89,6 +94,7 @@ class Baseline:
         #self.train_queue = Manager().Queue()
         #self.val_queue = Queue()
         self.max_num_processes = 5
+        self.concurrent_processes = Pool(processes=self.max_num_processes)
 
         #self.db_file.close()
 
@@ -202,3 +208,78 @@ class Baseline:
         self.val_chunk_index = chunk_index
 
         return batch_ligands, batch_labels
+
+    def train(self):
+        if (self.existing_model):
+            model = joblib.load(self.model_file)
+        else:
+            model = SGDRegressor()
+
+        lowest_err = float('inf')
+        stop_iter = 0
+
+        while True:
+            self.shuffle_train_data()
+            results = []
+            for i in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size):
+                p = Process(target=self.next_train_chunk, args=(i,))
+                results.append(p)
+                p.start()
+
+            print("started processes")
+            if self.train_db_index > self.train_members:
+                self.train_db_index = 0
+            else:
+                self.train_db_index += self.chunk_size*self.max_num_processes
+
+            for chunk in range(len(results)):
+                print("starting chunk #"+str(chunk))
+                self.train_receiver = results[chunk]
+                chunk_size = self.train_receiver[1].shape[0]
+                print(self.train_receiver[1])
+                for batch in tqdm(range(self.train_steps),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
+                    #print(self.running_process, self.train_queue.qsize())
+                    ligands, labels = self.next_train_batch(chunk_size)
+                    model.partial_fit(ligands, labels)
+
+            print("reached validation")
+            val_err = self.validate(model)
+
+            self.epochs+=1
+
+            if (val_err < lowest_err):
+                lowest_err = val_err
+                joblib.dump(model, self.model_file)
+                stop_iter = 0
+                self.optimal_epochs = self.epochs
+            else:
+                stop_iter+=1
+
+            if (stop_iter > self.stop_threshold):
+                print("Finished Training...\n")
+                print("\nValidation Set Error:", lowest_err)
+                return
+
+    def validate(self, model):
+        self.shuffle_val_data()
+        total_mse = 0
+        print("started val process")
+        p_next = Process(target=self.next_train_chunk, args=())
+        p_next.start()
+        for chunk in range(self.total_val_chunks):
+            self.val_receiver = self.val_queue.get(True)
+            chunk_size = self.val_receiver[1].shape[0]
+            for batch in range(self.val_steps):
+                if (not self.running_process and self.val_queue.qsize() < self.max_queue_size):
+                    p_next.terminate()
+                    p_next = Process(target=self.next_train_chunk)
+                    self.running_process = True
+                    p_next.start()
+
+                ligands, labels = self.next_val_batch(chunk_size)
+                predictions = model.predict(ligands)
+                mse = mean_squared_error(labels, predictions)
+                total_mse += mse
+
+
+        return total_mse/(self.chunk_size*self.total_val_chunks)
