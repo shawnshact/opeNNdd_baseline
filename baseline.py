@@ -22,7 +22,7 @@ def binSearch(arr, target):
 
     if target < arr[0]:
         return 0
-                            
+
     while (not found):
         if (target < arr[mid] and target >=arr[mid-1]):
             found = True
@@ -39,27 +39,27 @@ class SVM_Baseline:
     grid_dim, channels = 72, 6
     chunk_size = 50
     def __init__(self,db_path=None, storage_folder=None, batch_size=None, id=None):
-       
+
         if (id):
             assert (os.path.isdir(os.path.join(storage_folder, 'tmp', str(id)))), "Unable to locate model " + str(id) + " in the specified storage folder" + storage_folder
             self.id = id
             self.existing_model = True
         else:
             self.id = random.randint(100000, 999999) #generate random 6-digit model id
-            self.existing_model = False 
-        
+            self.existing_model = False
+
         self.batch_size = batch_size
         assert os.path.isfile(db_path), "Database does not exist in specified location: " + str(db_path)
-        
+
         None if os.path.isdir(storage_folder) else os.makedirs(storage_folder) #create dir if need be
         None if os.path.isdir(os.path.join(storage_folder, 'tmp')) else os.makedirs(os.path.join(storage_folder, 'tmp'))
         None if os.path.isdir(os.path.join(storage_folder, 'logs')) else os.makedirs(os.path.join(storage_folder, 'logs'))
         self.storage_folder = storage_folder #storage folder for model and logs
         self.model_folder = os.path.join(storage_folder, 'tmp', str(self.id))
         self.log_folder = os.path.join(storage_folder, 'logs', str(self.id))
-        
 
-        
+
+
         self.model_file = os.path.join(self.model_folder,str(self.id)+'.pkl')
 
         self.db_file = h5.File(db_path, mode='r') #handle to file
@@ -67,7 +67,7 @@ class SVM_Baseline:
         self.data_chunks = [len(self.db_file['labels'][partition]) for partition in self.db_file['labels']]
         self.chunk_thresholds = list(itertools.accumulate(self.data_chunks))
         self.total_members = self.chunk_thresholds[-1]
-        
+
         self.train_members = int(round(self.train_split*self.total_members))
         self.val_members = int(round(self.val_split*self.total_members))
         self.test_members = int(round(self.test_split*self.total_members))
@@ -77,7 +77,7 @@ class SVM_Baseline:
 
         self.train_steps = int(math.ceil(self.chunk_size/batch_size))
         self.val_steps = int(math.ceil(self.chunk_size/batch_size))
-      
+
         member_indices = list(range(self.total_members))
         random.shuffle(member_indices)
 
@@ -90,10 +90,10 @@ class SVM_Baseline:
         self.epochs, self.optimal_epochs = 0, 0
         self.min_epochs, self.stop_threshold = 0, 5
         self.running_process = False
- 
+
         self.train_queue = Queue()
         self.val_queue = Queue()
-  
+
         self.max_queue_size = 5
         #self.db_file.close()
 
@@ -158,11 +158,11 @@ class SVM_Baseline:
             self.val_db_index = 0
         else:
             self.val_db_index += chunk_size
-        
+
         self.temp_chunk_size = chunk_size
         #return as np arrays
         self.running_process = False
-        self.val_queue.put([batch_ligands, batch_energies]) 
+        self.val_queue.put([batch_ligands, batch_energies])
 
     def next_train_batch(self, chunk_size):
         flag = False
@@ -175,16 +175,16 @@ class SVM_Baseline:
 
         batch_ligands = self.train_receiver[0][chunk_index:chunk_index+batch_size]
         batch_labels = self.train_receiver[1][chunk_index:chunk_index+batch_size]
-        
+
         batch_labels = self.train_receiver[1][chunk_index:chunk_index+batch_size]
-        
+
         if flag:
             chunk_index = 0
         else:
             chunk_index +=batch_size
-        
+
         self.train_chunk_index = chunk_index
-        
+
         return batch_ligands, batch_labels
 
     def next_val_batch(self, chunk_size):
@@ -222,14 +222,12 @@ class SVM_Baseline:
             p_next = Process(target=self.next_train_chunk)
             self.running_process = True
             p_next.start()
-            p_next.join()        
-            print("reached train loop")
             for chunk in range(self.total_train_chunks):
                 self.train_receiver = self.train_queue.get(True)
-                print("populated train receiver")
                 chunk_size = self.train_receiver[1].shape[0]
                 for batch in tqdm(range(chunk_size/batch_size),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
-                    if (not self.running_process and self.train_queue.qsize() < self.max_queue_size):  
+                    if (not self.running_process and self.train_queue.qsize() < self.max_queue_size):
+                        p_next.terminate()
                         p_next = Process(target=self.next_train_chunk)
                         self.running_process = True
                         p_next.start()
@@ -260,22 +258,19 @@ class SVM_Baseline:
         p_next = Process(target=self.next_train_chunk, args=())
         p_next.start()
         for chunk in range(self.total_val_chunks):
-            if self.val_queue.empty():
-                p_next.join()    
             self.val_receiver = self.val_queue.get(True)
             chunk_size = self.val_receiver[1].shape[0]
             for batch in range(chunk_size):
                 if (not self.running_process and self.val_queue.qsize() < self.max_queue_size):
+                    p_next.terminate()
+                    p_next = Process(target=self.next_train_chunk)
+                    self.running_process = True
                     p_next.start()
+
                 ligands, labels = self.next_val_batch(chunk_size)
                 predictions = clf.predict(ligands)
                 mse = mean_squared_error(labels, predictions)
                 total_mse += mse
-            
-
-        return total_mse/(self.batch_size*self.total_val_chunks)
-
-    
 
 
-
+        return total_mse/(self.chunk_size*self.total_val_chunks)
