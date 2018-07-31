@@ -1,6 +1,6 @@
 import os
 import sys
-from multiprocessing import Pool, Process
+from multiprocessing import Pool, Process, Queue, Manager
 import numpy as np
 import h5py as h5
 import itertools
@@ -61,7 +61,7 @@ class Baseline:
 
 
         self.model_file = os.path.join(self.model_folder,str(self.id)+'.pkl')
-
+        self.db_path = db_path
         self.db_file = h5.File(db_path, mode='r') #handle to file
         self.chunk_names = [name for name in self.db_file['labels']]
         self.data_chunks = [len(self.db_file['labels'][partition]) for partition in self.db_file['labels']]
@@ -91,12 +91,11 @@ class Baseline:
         self.min_epochs, self.stop_threshold = 0, 5
         #self.master, self.subprocess = Pipe()
         self.running_process = False
-        #self.train_queue = Manager().Queue()
         #self.val_queue = Queue()
         self.max_num_processes = 5
         self.concurrent_processes = Pool(processes=self.max_num_processes)
 
-        #self.db_file.close()
+        self.db_file.close()
 
     def shuffle_train_data(self):
         random.shuffle(self.train_indices)
@@ -110,68 +109,54 @@ class Baseline:
         random.shuffle(self.test_indices)
         self.test_db_index = 0
 
-    def next_train_chunk(self, chunk_index):
-        print("start")
-        flag = False
+    def next_train_chunk(self, chunks_processed, results):
+        hFile = h5.File(self.db_path, 'r', swmr=True)
         chunk_size = self.chunk_size
-        #get the next batch
-        if (self.train_members - chunk_index) < chunk_size:
-            flag = True
+        
+        if (self.train_members - chunks_processed) < chunk_size:
             chunk_size = self.train_members%chunk_size
 
         batch_ligands = np.zeros([chunk_size, self.grid_dim*self.grid_dim*self.grid_dim*self.channels], dtype=np.float32)
         batch_energies = np.zeros([chunk_size], dtype=np.float32)
-        for i in range(self.train_db_index, self.train_db_index+chunk_size):
+
+        for i in range(chunks_processed, chunks_processed+chunk_size):
             file_index = binSearch(self.chunk_thresholds, self.train_indices[i])
             filename = str(self.chunk_names[file_index])
             chunk_index = (self.chunk_thresholds[file_index]-self.chunk_thresholds[file_index-1]-1) if file_index > 0 else self.train_indices[i]
-            batch_ligands[i-self.train_db_index] = self.db_file['ligands'][filename][chunk_index].flatten()
-            batch_energies[i-self.train_db_index] = self.db_file['labels'][filename][chunk_index]
-
-        if flag:
-            self.train_db_index = 0
-        else:
-            self.train_db_index += chunk_size
-
-        #return as np arrays
-        print("finish")
-        #self.train_queue.put([batch_ligands, batch_energies])
-        return [batch_ligands, batch_energies]
+            batch_ligands[i-chunks_processed] = hFile['ligands'][filename][chunk_index].flatten()
+            batch_energies[i-chunks_processed] = hFile['labels'][filename][chunk_index]
+        
+        results.put([batch_ligands, batch_energies])
+        hFile.close()
+        return
 
 
-    def next_val_chunk(self):
-        flag = False
+    def next_val_chunk(self, chunks_processed, results):
+        hFile = h5.File(self.db_path, 'r', swmr=True)
         chunk_size = self.chunk_size
-        #get the next batch
-        if (self.val_members - self.val_db_index) < chunk_size:
-            flag = True
+        
+        if (self.val_members - chunks_processed) < chunk_size:
             chunk_size = self.val_members%chunk_size
 
         batch_ligands = np.zeros([chunk_size, self.grid_dim*self.grid_dim*self.grid_dim*self.channels], dtype=np.float32)
         batch_energies = np.zeros([chunk_size], dtype=np.float32)
-        for i in range(self.val_db_index, self.val_db_index+chunk_size):
+
+        for i in range(chunks_processed, chunks_processed+chunk_size):
             file_index = binSearch(self.chunk_thresholds, self.val_indices[i])
             filename = str(self.chunk_names[file_index])
             chunk_index = (self.chunk_thresholds[file_index]-self.chunk_thresholds[file_index-1]-1) if file_index > 0 else self.val_indices[i]
-            batch_ligands[i-self.val_db_index] = self.db_file['ligands'][filename][chunk_index].flatten()
-            batch_energies[i-self.val_db_index] = self.db_file['labels'][filename][chunk_index]
+            batch_ligands[i-chunks_processed] = hFile['ligands'][filename][chunk_index].flatten()
+            batch_energies[i-chunks_processed] = hFile['labels'][filename][chunk_index]
 
-        if flag:
-            self.val_db_index = 0
-        else:
-            self.val_db_index += chunk_size
 
-        self.temp_chunk_size = chunk_size
-        #return as np arrays
-        self.val_queue.put([batch_ligands, batch_energies])
-        self.subprocess.send(False)
-        chunk_index = self.val_db_index
+        results.put([batch_ligands, batch_energies])
+        hFile.close()
+        return
 
     def next_train_batch(self, chunk_size):
         flag = False
         chunk_index = self.train_chunk_index
         batch_size = self.batch_size
-
         if (chunk_index + batch_size) > chunk_size:
             flag = True
             batch_size = chunk_size%batch_size
@@ -182,28 +167,30 @@ class Baseline:
         if flag:
             chunk_index = 0
         else:
-            chunk_index +=batch_size
+            chunk_index += batch_size
 
         self.train_chunk_index = chunk_index
-
+        
         return batch_ligands, batch_labels
-
+    
     def next_val_batch(self, chunk_size):
         flag = False
-        chunk_index = self.val_chunk_index
+        batch_index = self.val_chunk_index
         batch_size = self.batch_size
 
         if (chunk_index + batch_size) > chunk_size:
             flag = True
             batch_size = chunk_size%batch_size
 
-        batch_ligands = self.val_receiver[0][chunk_index:chunk_index+batch_size]
-        batch_labels = self.val_receiver[1][chunk_index:chunk_index+batch_size]
+        batch_ligands = self.val_receiver[0][batch_index:batch_index+batch_size]
+        batch_labels = self.val_receiver[1][chunk_index:batch_index+batch_size]
+        
+        print(batch_labels)
 
         if flag:
             chunk_index = 0
         else:
-            chunk_index +=batch_size
+            chunk_index += chunk_size
 
         self.val_chunk_index = chunk_index
 
@@ -217,34 +204,62 @@ class Baseline:
 
         lowest_err = float('inf')
         stop_iter = 0
-
+        manager = Manager()
+        results = manager.Queue()
+        total_processes = int(self.train_members//(self.chunk_size*self.max_num_processes))
+        remain_ligands = self.train_members%(self.chunk_size*self.max_num_processes)
+        remain_processes = remain_ligands//(self.chunk_size)
+        final_process_ligands = remain_ligands%self.chunk_size
         while True:
             self.shuffle_train_data()
-            results = []
+            jobs = []
+            process_count = 0
             for i in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size):
-                p = Process(target=self.next_train_chunk, args=(i,))
-                results.append(p)
+                p = Process(target=self.next_train_chunk, args=(i,results))
+                jobs.append(p)
                 p.start()
+                print("starting process: ", process_count)
+                process_count+=1
+            
+            self.train_db_index += self.chunk_size*self.max_num_processes
+            processing_epoch = True
+            chunk_num = 1
 
-            print("started processes")
-            if self.train_db_index > self.train_members:
-                self.train_db_index = 0
-            else:
-                self.train_db_index += self.chunk_size*self.max_num_processes
+            while (chunk_num < total_processes+1):
+                self.train_receiver = results.get(True)
 
-            for chunk in range(len(results)):
-                print("starting chunk #"+str(chunk))
-                self.train_receiver = results[chunk]
+                if results.empty() and chunk_num < total_processes-1:
+                    for p in jobs:
+                        p.terminate()
+                        p.join()
+                        print("did we at least finish joining holy fuck")
+                    for i in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size):
+                        print("are we getting to p assignment")
+                        p = Process(target=self.next_train_chunk, args=(i,results))
+                        jobs.append(p)
+                        print("is this where the deadlock is")
+                        p.start()
+                        print("starting process: ",process_count)
+                        process_count+=1
+                    self.train_db_index += self.chunk_size*self.max_num_processes
+                    chunk_num+=1
+                if chunk_num == total_processes-1:
+                    for i in range(self.train_db_index,self.chunk_size*remain_processes,self.chunk_size):
+                        p = Process(target=self.next_train_chunk, args=(i,results))
+                        jobs.append(p)
+                        p.start()
+                    chunk_num+=1
+                    self.train_db_index = 0
+
                 chunk_size = self.train_receiver[1].shape[0]
-                print(self.train_receiver[1])
+                self.train_chunk_index = 0
                 for batch in tqdm(range(self.train_steps),  desc = "Training Model " + str(self.id) + " - Epoch " + str(self.epochs+1)):
-                    #print(self.running_process, self.train_queue.qsize())
                     ligands, labels = self.next_train_batch(chunk_size)
                     model.partial_fit(ligands, labels)
-
+                   
             print("reached validation")
-            val_err = self.validate(model)
-
+            #val_err = self.validate(model)
+            val_err = 5
             self.epochs+=1
 
             if (val_err < lowest_err):
@@ -263,23 +278,27 @@ class Baseline:
     def validate(self, model):
         self.shuffle_val_data()
         total_mse = 0
-        print("started val process")
-        p_next = Process(target=self.next_train_chunk, args=())
-        p_next.start()
-        for chunk in range(self.total_val_chunks):
+        manager = Manager()
+        results = managers.Queue()
+        jobs = []
+        for i in range(self.train_db_index,self.chunk_size*self.max_num_processes,self.chunk_size):
+            p = Process(target=self.next_train_chunk, args=(i,results))
+            jobs.append(p)
+            p.start()
+
+        processing_val_set = True
+        step_count = 0
+        while (processing_val_set):
             self.val_receiver = self.val_queue.get(True)
             chunk_size = self.val_receiver[1].shape[0]
-            for batch in range(self.val_steps):
-                if (not self.running_process and self.val_queue.qsize() < self.max_queue_size):
-                    p_next.terminate()
-                    p_next = Process(target=self.next_train_chunk)
-                    self.running_process = True
-                    p_next.start()
-
+            for batch in range(self.val_steps): 
                 ligands, labels = self.next_val_batch(chunk_size)
                 predictions = model.predict(ligands)
                 mse = mean_squared_error(labels, predictions)
                 total_mse += mse
-
+            if (chunk_size != self.chunk_size):
+                processing_val_set = False
 
         return total_mse/(self.chunk_size*self.total_val_chunks)
+
+
